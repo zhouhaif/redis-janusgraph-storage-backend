@@ -20,7 +20,7 @@ Does not currently support locking nor transactions.
 
 ## Implementation
 
-Implements `KeyColumnValueStorageManager` and therefore `KeyColumnValueStore`, and uses [Lattuce](https://lettuce.io) to interface with Redis.
+Implements `KeyColumnValueStorageManager` and therefore `KeyColumnValueStore`, and uses [Lettuce](https://lettuce.io) to interface with Redis.
 
 Employs a key-indexed `HASH` (`KCV` covering index), a column-indexed `SET` (`CK` covering index), an `all-keys` covering index `SET`, and an `all-columns` covering index `SET` with internal Redis transactions—to ensure consistent updates—and asynchronous index (`all-keys` and `all-columns`) deletions.
 
