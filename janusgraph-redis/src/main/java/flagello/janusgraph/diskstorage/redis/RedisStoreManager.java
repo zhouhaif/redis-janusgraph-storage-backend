@@ -16,29 +16,29 @@ package flagello.janusgraph.diskstorage.redis;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
-import com.google.common.primitives.Bytes;
-import io.lettuce.core.*;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisException;
+import io.lettuce.core.RedisURI;
 import io.lettuce.core.api.StatefulRedisConnection;
-import io.lettuce.core.api.sync.RedisCommands;
+import io.lettuce.core.support.ConnectionPoolSupport;
+import org.apache.commons.pool2.impl.GenericObjectPool;
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.janusgraph.diskstorage.*;
 import org.janusgraph.diskstorage.common.AbstractStoreManager;
 import org.janusgraph.diskstorage.common.AbstractStoreTransaction;
-import org.janusgraph.diskstorage.configuration.ConfigNamespace;
 import org.janusgraph.diskstorage.configuration.Configuration;
 import org.janusgraph.diskstorage.keycolumnvalue.*;
-import org.janusgraph.diskstorage.util.ByteBufferUtil;
-import org.janusgraph.diskstorage.util.StaticArrayBuffer;
-import org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration;
-import static org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration.*;
 import org.janusgraph.graphdb.configuration.PreInitializeConfigOptions;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.time.Duration;
+import java.util.function.Supplier;
+
+import static org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration.*;
 
 
 @PreInitializeConfigOptions
@@ -61,6 +61,9 @@ public class RedisStoreManager extends AbstractStoreManager implements KeyColumn
 
     protected final StaticBuffer KEYS_SET_KEY = RedisStoreCodec.stringToBuffer("___keys___");
     protected final StaticBuffer COLUMNS_SET_KEY = RedisStoreCodec.stringToBuffer("___cols___");
+    private int coreSize = Runtime.getRuntime().availableProcessors();
+
+    private  GenericObjectPool<StatefulRedisConnection<StaticBuffer, StaticBuffer>> pool;
 
     public RedisStoreManager(Configuration configuration) throws BackendException {
         super(configuration);
@@ -75,7 +78,17 @@ public class RedisStoreManager extends AbstractStoreManager implements KeyColumn
             .withPassword(password)
             .withTimeout(connectionTimeoutMS)
             .build());
-
+        GenericObjectPoolConfig config = new GenericObjectPoolConfig();
+        config.setMaxTotal(coreSize*8);
+        config.setMaxIdle(coreSize*2);
+        config.setMinIdle(coreSize);
+        pool = ConnectionPoolSupport
+            .createGenericObjectPool(new Supplier<StatefulRedisConnection<StaticBuffer, StaticBuffer>>() {
+                @Override
+                public StatefulRedisConnection<StaticBuffer, StaticBuffer> get() {
+                    return client.connect(codec);
+                }
+            }, config);
         features = new StandardStoreFeatures.Builder()
             .keyConsistent(configuration)
             .persists(true)
@@ -103,9 +116,11 @@ public class RedisStoreManager extends AbstractStoreManager implements KeyColumn
         }
 
         try {
-            log.debug("Opening database {}", name, new Throwable());
+//            log.debug("Opening database {}", name, new Throwable());
+            log.debug("Opening database {}", name);
 
-            RedisKeyColumnValueStore store = new RedisKeyColumnValueStore(name, client.connect(codec).sync(), this);
+//            RedisKeyColumnValueStore store = new RedisKeyColumnValueStore(name, client.connect(codec).sync(), this);
+            RedisKeyColumnValueStore store = new RedisKeyColumnValueStore(name, pool, this);
             stores.put(name, store);
             return store;
         } catch (RedisException e) {
@@ -170,6 +185,7 @@ public class RedisStoreManager extends AbstractStoreManager implements KeyColumn
     public void close() throws BackendException {
         try {
             for (RedisKeyColumnValueStore db : stores.values()) db.close();
+            pool.close();
             client.shutdown();
         } catch (RedisException e) {
             throw new PermanentBackendException("Could not shutdown Redis client", e);

@@ -15,8 +15,10 @@
 package flagello.janusgraph.diskstorage.redis;
 
 import io.lettuce.core.*;
+import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import io.lettuce.core.api.async.RedisAsyncCommands;
+import org.apache.commons.pool2.impl.GenericObjectPool;
 import org.janusgraph.diskstorage.*;
 import org.janusgraph.diskstorage.keycolumnvalue.*;
 import org.janusgraph.diskstorage.util.*;
@@ -25,63 +27,94 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.lang.String;
+import java.util.function.Consumer;
 
 public class RedisKeyColumnValueStore implements KeyColumnValueStore {
 
     private static final Logger log = LoggerFactory.getLogger(RedisKeyColumnValueStore.class);
 
-    private final RedisCommands<StaticBuffer, StaticBuffer> sync;
-    private final RedisAsyncCommands<StaticBuffer, StaticBuffer> async;
+//    private final RedisCommands<StaticBuffer, StaticBuffer> sync;
+//    private final RedisAsyncCommands<StaticBuffer, StaticBuffer> async;
     private final String name;
     private final RedisStoreManager manager;
+    private final GenericObjectPool<StatefulRedisConnection<StaticBuffer, StaticBuffer>> pool;
 
-    RedisKeyColumnValueStore(String name, RedisCommands<StaticBuffer, StaticBuffer> sync, RedisStoreManager manager) {
-        this.sync = sync;
-        this.async = sync.getStatefulConnection().async();
+    RedisKeyColumnValueStore(String name, GenericObjectPool<StatefulRedisConnection<StaticBuffer, StaticBuffer>> pool, RedisStoreManager manager) {
+        this.pool = pool;
+//        this.sync = sync;
+//        this.async = sync.getStatefulConnection().async();
         this.name = name;
         this.manager = manager;
     }
 
     public void add(StaticBuffer key, StaticBuffer column, StaticBuffer value) throws BackendException {
+        RedisCommands<StaticBuffer, StaticBuffer> sync=null;
+        StatefulRedisConnection<StaticBuffer, StaticBuffer> connection = null;
         try {
+            connection = pool.borrowObject();
+//            log.info("Add to redis, pool hash is {},pool size is {},connection object {}",pool.hashCode(),pool.listAllObjects().size(),connection);
+            sync = connection.sync();
             sync.multi();
             sync.hset(key, column, value); // Key-indexed Hash
             sync.sadd(column, key); // Column-indexed Set
             sync.sadd(manager.KEYS_SET_KEY, key); // All keys
             sync.sadd(manager.COLUMNS_SET_KEY, column); // All columns
             sync.exec();
-        } catch (RedisException e) {
-            sync.discard();
+        } catch (Exception e) {
+            e.printStackTrace();
+            if(sync!=null){
+                sync.discard();
+            }
             throw new PermanentBackendException(e);
+        }finally {
+            if(connection!=null) pool.returnObject(connection);
         }
     }
 
     public void del(StaticBuffer key, StaticBuffer column) throws BackendException {
-        try {
+        RedisCommands<StaticBuffer, StaticBuffer> sync=null;
+        StatefulRedisConnection<StaticBuffer, StaticBuffer> connection = null;
+        try{
+            connection = pool.borrowObject();
+            sync = connection.sync();
             sync.multi();
             sync.hdel(key, column);
             sync.srem(column, key);
             sync.exec();
 
             cleanIndexes(key, column);
-        } catch (RedisException e) {
-            sync.discard();
+        } catch (Exception e) {
+            e.printStackTrace();
+            if(sync!=null){
+                sync.discard();
+            }
             throw new PermanentBackendException(e);
+        }finally {
+            if(connection!=null) pool.returnObject(connection);
         }
     }
 
     private void cleanIndexes(StaticBuffer key, StaticBuffer column) {
-        async.exists(key).thenAcceptAsync(exists -> {
-            if (exists == 0) {
-                async.srem(manager.KEYS_SET_KEY, key);
-            }
-        });
+        StatefulRedisConnection<StaticBuffer, StaticBuffer> connection=null;
+        try{
+            connection = pool.borrowObject();
+            RedisAsyncCommands<StaticBuffer, StaticBuffer> async = connection.async();
+            async.exists(key).thenAcceptAsync(exists -> {
+                if (exists == 0) {
+                    async.srem(manager.KEYS_SET_KEY, key);
+                }
+            });
 
-        async.scard(column).thenAcceptAsync(cardinality -> {
-            if (cardinality == 0) {
-                async.srem(manager.COLUMNS_SET_KEY, column);
-            }
-        });
+            async.scard(column).thenAcceptAsync(cardinality -> {
+                if (cardinality == 0) {
+                    async.srem(manager.COLUMNS_SET_KEY, column);
+                }
+            });
+        }catch (Exception e){
+            e.printStackTrace();
+        }finally {
+            if(connection!=null) pool.returnObject(connection);
+        }
     }
 
     @Override // This method is only supported by stores which keep keys in byte-order.
@@ -97,8 +130,10 @@ public class RedisKeyColumnValueStore implements KeyColumnValueStore {
         // See if limit is intended as an upper bound?
 
         final Map<StaticBuffer, Set<StaticBuffer>> results = new HashMap<>();
-
-        try {
+        StatefulRedisConnection<StaticBuffer, StaticBuffer> connection = null;
+        try{
+            connection = pool.borrowObject();
+            RedisCommands<StaticBuffer, StaticBuffer> sync = connection.sync();
             // 1. Start from columns as they are the inner filter.
             ScanIterator.sscan(sync, manager.COLUMNS_SET_KEY)
                 .forEachRemaining(column -> {
@@ -115,8 +150,10 @@ public class RedisKeyColumnValueStore implements KeyColumnValueStore {
                             });
                     }
                 });
-        } catch (RedisException e) {
+        } catch (Exception e) {
             throw new PermanentBackendException(e);
+        }finally {
+            if(connection!=null) pool.returnObject(connection);
         }
 
         return keyIteratorFactory(results);
@@ -129,8 +166,10 @@ public class RedisKeyColumnValueStore implements KeyColumnValueStore {
         // final int limit = query.getLimit();
 
         final Map<StaticBuffer, Set<StaticBuffer>> results = new HashMap<>();
-
+        StatefulRedisConnection<StaticBuffer, StaticBuffer> connection = null;
         try {
+            connection = pool.borrowObject();
+            RedisCommands<StaticBuffer, StaticBuffer> sync = connection.sync();
             // 1. Scan the columns set.
             ScanIterator.sscan(sync, manager.COLUMNS_SET_KEY)
                 .forEachRemaining(column -> {
@@ -144,8 +183,10 @@ public class RedisKeyColumnValueStore implements KeyColumnValueStore {
                             });
                     }
                 });
-        } catch (RedisException e) {
+        } catch (Exception e) {
             throw new PermanentBackendException(e);
+        }finally {
+            if(connection!=null) pool.returnObject(connection);
         }
 
         return keyIteratorFactory(results);
@@ -178,7 +219,16 @@ public class RedisKeyColumnValueStore implements KeyColumnValueStore {
                     @Override
                     public Entry next() {
                         final StaticBuffer column = columnIterator.next();
-                        final StaticBuffer value = sync.hget(currentKey, column);
+                        StaticBuffer value = null;
+                        StatefulRedisConnection<StaticBuffer, StaticBuffer> connection = null;
+                        try {
+                            connection = pool.borrowObject();
+                            value = connection.sync().hget(currentKey, column);
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                        }finally {
+                            if(connection!=null) pool.returnObject(connection);
+                        }
                         return StaticArrayEntry.of(column, value);
                     }
 
@@ -210,17 +260,23 @@ public class RedisKeyColumnValueStore implements KeyColumnValueStore {
         // final int limit = query.getLimit();
 
         final EntryArrayList result = new EntryArrayList();
-
-        try {
+        StatefulRedisConnection<StaticBuffer, StaticBuffer> connection = null;
+        try{
+            connection = pool.borrowObject();
+            RedisCommands<StaticBuffer, StaticBuffer> sync = connection.sync();
             ScanIterator.hscan(sync, key)
                 .forEachRemaining(columnValue -> {
                     final StaticBuffer column = columnValue.getKey();
-                    if (matches(columnStart, columnEnd, column)) {
+                    if (RedisKeyColumnValueStore.this.matches(columnStart, columnEnd, column)) {
                         result.add(StaticArrayEntry.of(column, columnValue.getValue()));
                     }
                 });
-        } catch (RedisException e) {
+        } catch (Exception e) {
+            e.printStackTrace();
+            log.info("RedisException: "+e.getCause());
             throw new PermanentBackendException(e);
+        }finally {
+            if(connection!=null) pool.returnObject(connection);
         }
 
         return result;
@@ -256,14 +312,24 @@ public class RedisKeyColumnValueStore implements KeyColumnValueStore {
 
     @Override
     public synchronized void close() throws BackendException {
-        sync.getStatefulConnection().close();
+//        pool.close();
+//        sync.getStatefulConnection().close();
         manager.removeDatabase(this);
     }
 
     public synchronized void clear() {
-        sync.flushdb();
-        // https://redis.io/commands/flushdb
-        // This command never fails and is asynchronous.
+        StatefulRedisConnection<StaticBuffer, StaticBuffer> connection = null;
+        try {
+            connection = pool.borrowObject();
+            RedisCommands<StaticBuffer, StaticBuffer> sync = connection.sync();
+            sync.flushdb();
+            // https://redis.io/commands/flushdb
+            // This command never fails and is asynchronous.
+        }catch (Exception e){
+            e.printStackTrace();
+        }finally {
+            if(connection!=null) pool.returnObject(connection);
+        }
     }
 
     @Override
